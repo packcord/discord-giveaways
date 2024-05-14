@@ -33,7 +33,7 @@ class GiveawaysManager extends EventEmitter {
     constructor(client, options, init = true) {
         super();
         if (!client?.options) throw new Error(`Client is a required option. (val=${client})`);
-        if (
+        if (!options?.ignoreMissingIntents && 
             !new Discord.IntentsBitField(client.options.intents).has(
                 Discord.IntentsBitField.Flags.GuildMessageReactions
             )
