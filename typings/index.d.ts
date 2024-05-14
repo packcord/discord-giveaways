@@ -89,6 +89,7 @@ export interface PauseOptions {
 export interface GiveawaysManagerOptions<ExtraData> {
     storage?: string;
     forceUpdateEvery?: number;
+    ignoreMissingIntents?: boolean;
     endedGiveawaysLifetime?: number;
     default?: {
         botsCanWin?: boolean;
