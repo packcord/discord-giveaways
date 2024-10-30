@@ -33,13 +33,6 @@ class GiveawaysManager extends EventEmitter {
     constructor(client, options, init = true) {
         super();
         if (!client?.options) throw new Error(`Client is a required option. (val=${client})`);
-        if (
-            !new Discord.IntentsBitField(client.options.intents).has(
-                Discord.IntentsBitField.Flags.GuildMessageReactions
-            )
-        ) {
-            throw new Error('Client is missing the "GuildMessageReactions" intent.');
-        }
 
         /**
          * The Discord Client
@@ -232,7 +225,6 @@ class GiveawaysManager extends EventEmitter {
             if (!options.isDrop && (!Number.isFinite(options.duration) || options.duration < 1)) {
                 return reject(`options.duration is not a positive number. (val=${options.duration})`);
             }
-
             const giveaway = new Giveaway(this, {
                 startAt: Date.now(),
                 endAt: options.isDrop ? Infinity : Date.now() + options.duration,
@@ -247,7 +239,18 @@ class GiveawaysManager extends EventEmitter {
                         : GiveawayMessages,
                 thumbnail: typeof options.thumbnail === 'string' ? options.thumbnail : undefined,
                 image: typeof options.image === 'string' ? options.image : undefined,
-                reaction: Discord.resolvePartialEmoji(options.reaction) ? options.reaction : undefined,
+                buttonEmoji: Discord.resolvePartialEmoji(options.button.emoji) ? options.button.emoji : undefined,
+                buttonLabel: typeof options.button.label == 'string' ? options.button.label : undefined,
+                buttonStyle:
+                    options.button.style == 1 || options.button.style == 'Primary'
+                        ? Discord.ButtonStyle.Primary
+                        : options.button.style == 2 || options.button.style == 'Secondary'
+                        ? Discord.ButtonStyle.Secondary
+                        : options.button.style == 3 || options.button.style == 'Success'
+                        ? Discord.ButtonStyle.Success
+                        : options.button.style == 4 || options.button.style == 'Danger'
+                        ? Discord.ButtonStyle.Danger
+                        : undefined,
                 botsCanWin: typeof options.botsCanWin === 'boolean' ? options.botsCanWin : undefined,
                 exemptPermissions: Array.isArray(options.exemptPermissions) ? options.exemptPermissions : undefined,
                 exemptMembers: typeof options.exemptMembers === 'function' ? options.exemptMembers : undefined,
@@ -270,34 +273,79 @@ class GiveawaysManager extends EventEmitter {
                     options.allowedMentions && typeof options.allowedMentions === 'object'
                         ? options.allowedMentions
                         : undefined,
-                isDrop: options.isDrop
+                isDrop: options.isDrop,
+                entries: []
             });
-
             const embed = this.generateMainEmbed(giveaway);
+            const actionRow = new Discord.ActionRowBuilder().addComponents(
+                new Discord.ButtonBuilder({
+                    custom_id: 'joinGiveaway',
+                    emoji: giveaway.options.buttonEmoji,
+                    label: giveaway.options.buttonLabel,
+                    style: giveaway.options.buttonStyle
+                })
+            );
             const message = await channel.send({
                 content: giveaway.fillInString(giveaway.messages.giveaway),
                 embeds: [embed],
+                components: [actionRow],
                 allowedMentions: giveaway.allowedMentions
             });
             giveaway.messageId = message.id;
-            const reaction = await message.react(giveaway.reaction);
-            giveaway.message = reaction.message;
+
             this.giveaways.push(giveaway);
-            await this.saveGiveaway(giveaway.messageId, giveaway.data);
             resolve(giveaway);
+            await this.createButtonCollector(message, giveaway);
+            await this.saveGiveaway(giveaway.messageId, giveaway.data);
             if (giveaway.isDrop) {
-                reaction.message
-                    .awaitReactions({
-                        filter: async (r, u) =>
-                            [r.emoji.name, r.emoji.id]
-                                .filter(Boolean)
-                                .includes(reaction.emoji.id ?? reaction.emoji.name) &&
-                            u.id !== this.client.user.id &&
+                message
+                    .awaitMessageComponent({
+                        componentType: Discord.ComponentType.Button,
+                        filter: async (int) =>
+                            [int.customId].includes('joinGiveaway') &&
+                            int.user.id !== this.client.user.id &&
                             (await giveaway.checkWinnerEntry(u)),
                         maxUsers: giveaway.winnerCount
                     })
-                    .then(() => this.end(giveaway.messageId))
+                    .then((int) => this.end(giveaway.messageId))
                     .catch(() => {});
+            }
+        });
+    }
+    /**
+     *
+     * @param {Discord.Message} message
+     * @param {Giveaway} giveaway
+     */
+    async createButtonCollector(message, giveaway) {
+        let collector = await message.createMessageComponentCollector({
+            componentType: Discord.ComponentType.Button,
+            filter: async (int) => [int.customId].includes('joinGiveaway') && int.user.id !== this.client.user.id
+        });
+
+        collector.on('collect', async (int) => {
+            try {
+                // Si el usuario ya está inscrito, responder de manera ephemérica solo si no se ha respondido previamente
+                if (giveaway.entries.includes(int.user.id)) {
+                    if (!int.replied && !int.deferred) {
+                        await int.reply({
+                            content: giveaway.messages.alreadyJoined,
+                            ephemeral: true
+                        });
+                    }
+                    return;
+                }
+                giveaway.addEntry(int.user.id);
+                this.emit('giveawayEntered', giveaway, int.member);
+
+                if (!int.replied && !int.deferred) {
+                    await int.reply({
+                        content: giveaway.messages.joined,
+                        ephemeral: true
+                    });
+                }
+            } catch (err) {
+                return;
             }
         });
     }
@@ -519,7 +567,7 @@ class GiveawaysManager extends EventEmitter {
             if (giveaway.isDrop) {
                 giveaway.message = await giveaway.fetchMessage().catch(() => {});
 
-                if (giveaway.messageReaction?.count - 1 >= giveaway.winnerCount) {
+                if (giveaway.entries?.length - 1 >= giveaway.winnerCount) {
                     const users = await giveaway.fetchAllEntrants().catch(() => {});
 
                     let validUsers = 0;
@@ -597,7 +645,7 @@ class GiveawaysManager extends EventEmitter {
             const needUpdate =
                 !embedEqual(giveaway.message.embeds[0].data, updatedEmbed.data) ||
                 giveaway.message.content !== giveaway.fillInString(giveaway.messages.giveaway);
-
+            this.createButtonCollector(giveaway.message, giveaway);
             if (needUpdate || this.options.forceUpdateEvery) {
                 await giveaway.message
                     .edit({
@@ -609,59 +657,6 @@ class GiveawaysManager extends EventEmitter {
             }
         });
     }
-
-    /**
-     * @ignore
-     * @param {any} packet
-     */
-    async _handleRawPacket(packet) {
-        if (!['MESSAGE_REACTION_ADD', 'MESSAGE_REACTION_REMOVE'].includes(packet.t)) return;
-        if (packet.d.user_id === this.client.user.id) return;
-
-        const giveaway = this.giveaways.find((g) => g.messageId === packet.d.message_id);
-        if (!giveaway || (giveaway.ended && packet.t === 'MESSAGE_REACTION_REMOVE')) return;
-
-        const guild =
-            this.client.guilds.cache.get(packet.d.guild_id) ||
-            (await this.client.guilds.fetch(packet.d.guild_id).catch(() => {}));
-        if (!guild || !guild.available) return;
-
-        const member = await guild.members.fetch(packet.d.user_id).catch(() => {});
-        if (!member) return;
-
-        const channel = await this.client.channels.fetch(packet.d.channel_id).catch(() => {});
-        if (!channel) return;
-
-        const message = await channel.messages.fetch(packet.d.message_id).catch(() => {});
-        if (!message) return;
-
-        const emoji = Discord.resolvePartialEmoji(giveaway.reaction);
-        const reaction = message.reactions.cache.find((r) =>
-            [r.emoji.name, r.emoji.id].filter(Boolean).includes(emoji?.id ?? emoji?.name)
-        );
-        if (!reaction || reaction.emoji.name !== packet.d.emoji.name) return;
-        if (reaction.emoji.id && reaction.emoji.id !== packet.d.emoji.id) return;
-
-        if (packet.t === 'MESSAGE_REACTION_ADD') {
-            if (giveaway.ended) return this.emit('endedGiveawayReactionAdded', giveaway, member, reaction);
-            this.emit('giveawayReactionAdded', giveaway, member, reaction);
-
-            // Only end drops if the amount of available, valid winners is equal to the winnerCount
-            if (giveaway.isDrop && reaction.count - 1 >= giveaway.winnerCount) {
-                const users = await giveaway.fetchAllEntrants().catch(() => {});
-
-                let validUsers = 0;
-                for (const user of [...(users?.values() || [])]) {
-                    if (await giveaway.checkWinnerEntry(user)) validUsers++;
-                    if (validUsers === giveaway.winnerCount) {
-                        await this.end(giveaway.messageId).catch(() => {});
-                        break;
-                    }
-                }
-            }
-        } else this.emit('giveawayReactionRemoved', giveaway, member, reaction);
-    }
-
     /**
      * Inits the manager
      * @ignore
@@ -699,8 +694,6 @@ class GiveawaysManager extends EventEmitter {
             );
             for (const giveaway of endedGiveaways) await this.deleteGiveaway(giveaway.messageId);
         }
-
-        this.client.on('raw', (packet) => this._handleRawPacket(packet));
     }
 }
 
@@ -721,47 +714,31 @@ class GiveawaysManager extends EventEmitter {
 
 /**
  * Emitted when someone entered a giveaway.
- * @event GiveawaysManager#giveawayReactionAdded
+ * @event GiveawaysManager#giveawayEntered
  * @param {Giveaway} giveaway The giveaway instance
  * @param {Discord.GuildMember} member The member who entered the giveaway
- * @param {Discord.MessageReaction} reaction The reaction to enter the giveaway
  *
  * @example
  * // This can be used to add features such as removing reactions of members when they do not have a specific role (= giveaway requirements)
  * // Best used with the "exemptMembers" property of the giveaways
- * manager.on('giveawayReactionAdded', (giveaway, member, reaction) => {
+ * manager.on('giveawayEntered', (giveaway, member) => {
  *     if (!member.roles.cache.get('123456789')) {
- *          reaction.users.remove(member.user);
  *          member.send('You must have this role to participate in the giveaway: Staff');
+ *          giveaway.removeEntry(member.id)
  *     }
  * });
  */
 
 /**
  * Emitted when someone removed their reaction to a giveaway.
- * @event GiveawaysManager#giveawayReactionRemoved
+ * @event GiveawaysManager#giveawayQuit
  * @param {Giveaway} giveaway The giveaway instance
- * @param {Discord.GuildMember} member The member who remove their reaction giveaway
- * @param {Discord.MessageReaction} reaction The reaction to enter the giveaway
+ * @param {Discord.GuildMember} member The member who quits the giveaway
  *
  * @example
  * // This can be used to add features such as a member-left-giveaway message per DM
- * manager.on('giveawayReactionRemoved', (giveaway, member, reaction) => {
+ * manager.on('giveawayQuit', (giveaway, member) => {
  *      return member.send('That\'s sad, you won\'t be able to win the super cookie!');
- * });
- */
-
-/**
- * Emitted when someone reacted to a ended giveaway.
- * @event GiveawaysManager#endedGiveawayReactionAdded
- * @param {Giveaway} giveaway The giveaway instance
- * @param {Discord.GuildMember} member The member who reacted to the ended giveaway
- * @param {Discord.MessageReaction} reaction The reaction to enter the giveaway
- *
- * @example
- * // This can be used to prevent new participants when giveaways get rerolled
- * manager.on('endedGiveawayReactionAdded', (giveaway, member, reaction) => {
- *      return reaction.users.remove(member.user);
  * });
  */
 
