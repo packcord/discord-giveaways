@@ -38,15 +38,15 @@
   },
   "homepage": "https://discord-giveaways.js.org",
   "dependencies": {
-    "deepmerge-ts": "^4.3.0",
-    "serialize-javascript": "^6.0.2"
+    "deepmerge-ts": "^5.0.0",
+    "serialize-javascript": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^18.19.61",
     "discord.js": "^14.16.3",
     "eslint": "^8.57.1",
     "eslint-plugin-node": "^11.1.0",
-    "jsdoc": "^3.6.11",
+    "jsdoc": "^4.0.2",
     "jsdoc-skyceil": "Androz2091/jsdoc-skyceil",
     "typescript": "^4.9.5"
   },
